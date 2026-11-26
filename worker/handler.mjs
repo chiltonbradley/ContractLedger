@@ -20,7 +20,38 @@ function validToken(actual, expected) {
 
 export default {
   async fetch(request, env) {
+    const reviewResponse = await clAppRoute(request, env);
+    if (reviewResponse) return reviewResponse;
     const path = new URL(request.url).pathname;
+    if(path==='/api/internal/extraction-check') {
+      if (!env.AI_CHECK_TOKEN || !validToken(request.headers.get('Authorization') || '', `Bearer ${env.AI_CHECK_TOKEN}`)) return json({error:'unauthorized'},401);
+      if(request.method!=='POST')return json({error:'method_not_allowed'},405);
+      try {
+        const data=Uint8Array.from(atob(CL_SYNTHETIC_PDF),c=>c.charCodeAt(0)),hash=await clHash(data);
+        const sample={id:'synthetic-probe',companyId:'synthetic-probe',fingerprint:hash,files:[{name:'sample-contract.pdf',mime:'application/pdf',hash,size:data.length}],answers:{},review:{}};
+        const isolatedEnv={...env,BUCKET:{async get(){return {async arrayBuffer(){return data.buffer;}};}}};
+        const result=await clAnalyze(isolatedEnv,sample,{id:'synthetic-probe',folder:'synthetic-probe',policies:'No company policy is assumed.',policyApproved:false});
+        const same=(a,b)=>{try{const [n,d]=clFraction(a),[m,e]=clFraction(b);return n*e===m*d;}catch{return false;}};
+        const usage=result.terms.charges.find(c=>same(c.unitPriceDollars,'0.0212'));
+        const seats=result.terms.charges.find(c=>same(c.unitPriceDollars,'99'));
+        const verified=usage?.billingCadence==='monthly'&&same(seats?.minimumQuantity,'10');
+        return json({verified,model:result.analysis.model,sourceHash:hash,exactUsageRate:usage?.unitPriceDollars||null,usageCadence:usage?.billingCadence||null,signedMinimum:seats?.minimumQuantity||null,privateCustomerDocumentsUsed:false},verified?200:502);
+      }catch{return json({verified:false,error:'synthetic_extraction_failed'},502);}
+    }
+    if (path === '/api/internal/storage-check') {
+      if (!env.AI_CHECK_TOKEN || !validToken(request.headers.get('Authorization') || '', `Bearer ${env.AI_CHECK_TOKEN}`)) return json({error:'unauthorized'},401);
+      if(request.method!=='POST')return json({error:'method_not_allowed'},405);
+      if(!env.DB||!env.BUCKET)return json({ready:false,error:'bindings_unavailable'},503);
+      const key='_health/'+crypto.randomUUID();
+      try {
+        const tables=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('cl_companies','cl_reviews','cl_versions')").all();
+        if(tables.results.length!==3)return json({ready:false,error:'schema_incomplete'},503);
+        const challenge=crypto.randomUUID();await env.BUCKET.put(key,challenge);
+        const object=await env.BUCKET.get(key);const verified=object&&await object.text()===challenge;
+        return json({ready:!!verified,databaseTables:tables.results.length,privateFileRoundTrip:!!verified},verified?200:503);
+      } catch {return json({ready:false,error:'storage_unavailable'},503);}
+      finally {await env.BUCKET.delete(key).catch(()=>{});}
+    }
     if (path === '/api/health') {
       if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
       return json({ ok: true, aiConfigured: Boolean(env.OPENAI_API_KEY), service: 'ContractLedger.ai' });

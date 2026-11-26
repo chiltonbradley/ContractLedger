@@ -1,0 +1,14 @@
+import http from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { testStorage } from './review-test-runtime.mjs';
+import { fixtureRecord,samplePdf } from './review-fixtures.mjs';
+import { clHash } from '../worker/review-domain.mjs';
+const {default:worker}=await import('data:text/javascript;base64,'+Buffer.from(await readFile('dist/server/index.js','utf8')).toString('base64'));
+const env={...await testStorage(),REVIEW_OWNER_EMAIL:'owner@example.test',OPENAI_API_KEY:'local-fixture-only'};
+const company={id:'example-company',name:'Example Company',folder:'example-contracts',policies:'Example only — no approved company policy.',policyApproved:false};
+await env.DB.prepare('INSERT INTO cl_companies(id,owner_id,name,folder,policy_json,created_at) VALUES(?,?,?,?,?,?)').bind(company.id,'local-reviewer',company.name,company.folder,JSON.stringify(company),new Date().toISOString()).run();
+const record=fixtureRecord(),pdf=samplePdf(),hash=await clHash(pdf);record.files=[{hash,mime:'application/pdf',name:'sample-contract.pdf',size:pdf.length}];
+await env.BUCKET.put(`${company.id}/${company.folder}/${record.id}/${hash}`,pdf);
+await env.DB.prepare('INSERT INTO cl_reviews(id,company_id,fingerprint,state_json,status,updated_at) VALUES(?,?,?,?,?,?)').bind(record.id,company.id,record.fingerprint,JSON.stringify(record),'review',new Date().toISOString()).run();
+const originalFetch=globalThis.fetch;globalThis.fetch=async(url,...args)=>{if(String(url).startsWith('https://api.openai.com/'))return Response.json({error:'Local preview never calls OpenAI'},{status:503});return originalFetch(url,...args);};
+http.createServer(async(req,res)=>{try{const chunks=[];for await(const c of req)chunks.push(c);const body=Buffer.concat(chunks);const headers=new Headers(req.headers);headers.set('oai-authenticated-user-id','local-reviewer');headers.set('oai-authenticated-user-email','owner@example.test');headers.set('Origin','http://127.0.0.1:4179');const r=await worker.fetch(new Request('http://127.0.0.1:4179'+req.url,{method:req.method,headers,body:['GET','HEAD'].includes(req.method)?undefined:body}),env);res.writeHead(r.status,Object.fromEntries(r.headers));res.end(Buffer.from(await r.arrayBuffer()));}catch{res.writeHead(500);res.end('Preview error');}}).listen(4179,'127.0.0.1',()=>console.log('Local synthetic-data preview: http://127.0.0.1:4179/app'));

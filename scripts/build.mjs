@@ -1,8 +1,12 @@
 import { readFile, mkdir, writeFile, copyFile } from 'node:fs/promises';
+import { samplePdf } from './review-fixtures.mjs';
 const html = await readFile('site/index.html', 'utf8');
+const appHtml = await readFile('site/app.html', 'utf8');
+const domain = (await readFile('worker/review-domain.mjs', 'utf8')).replace(/export /g, '');
+const api = (await readFile('worker/review-api.mjs', 'utf8')).replace(/export /g, '');
 const handler = await readFile('worker/handler.mjs', 'utf8');
 await mkdir('dist/server', { recursive: true });
 await mkdir('dist/.openai', { recursive: true });
-await writeFile('dist/server/index.js', `const LANDING_HTML = ${JSON.stringify(html)};\n${handler}`);
+await writeFile('dist/server/index.js', `const LANDING_HTML = ${JSON.stringify(html)};\nconst CL_APP_HTML = ${JSON.stringify(appHtml)};\nconst CL_SYNTHETIC_PDF = ${JSON.stringify(Buffer.from(samplePdf()).toString('base64'))};\n${domain}\n${api}\n${handler}`);
 await copyFile('.openai/hosting.json', 'dist/.openai/hosting.json');
 console.log('Built ContractLedger server and landing page.');
